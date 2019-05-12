@@ -1,0 +1,132 @@
+---
+title: "Risk Management Problem Set 4"
+author: "Ranadheer Thatishetti"
+date: "5/6/2019"
+output: pdf_document
+---
+##Problem 1
+We will consider three additional variations on how to compute VaR for the return series.
+1. Compute volatility using the EWMA with  = 0:995. Compute the corresponding
+measure of VaR.
+```{r}
+library(dplyr)
+setwd("~/Desktop/Spring 2019/Risk Management/Home Works/HW 4")
+data <- read.csv('hw3_returns2.csv')
+data$Date <- as.Date(data$Date, "%m/%d/%Y")
+data_subset = data[data$Date>"0014-12-31",]
+data_subset = data.frame(Date = data$Date[data$Date >= "0015-01-01"], 
+                         Return = data$Return[data$Date >= "0015-01-01"], 
+                         EWMA_sigma = 0, EWMA_VaR = 0)
+
+vol_14 = sd(data$Return[1:252])
+
+lambda = 0.94
+c = 0.99
+data_subset$EWMA_sigma[1] = vol_14
+for (i in 2:nrow(data_subset)){
+  data_subset$EWMA_sigma[i] = sqrt(lambda*(data_subset$EWMA_sigma[i-1]**2) + (1-lambda)*(data_subset$Return[i]**2))
+}
+
+data_subset$EWMA_VaR = qnorm(p = 1-c, mean = 0, sd = EWMA_sigma)
+data_subset$EMWA_VaR = as.data.frame(EWMA_VaR)
+plot(x = data_subset$Date, y = data_subset$Return, type = "l", pch=19, main = "VaR using EWMA", ylab = "Returns", col = "red", xlab = "date")
+lines(x = data_subset$Date, y = data_subset$EWMA_VaR, col = "blue")
+  
+
+exceptions = sum(data_subset$Return < EWMA_VaR, na.rm = T)
+print(paste0("No of exceptions using EWMA is = ", exceptions))
+```
+
+2. Use maximum likelihood estimation to estimate a GARCH model for volatility. Compute the corresponding measure of VaR.
+```{r}
+#Formula for maximum likelihood
+if(F){" GARCH sigma_t^2 = gamma*V_l + alpha*R^2 + beta*sigma[-1]**2"}
+  
+
+garch_MLE = function (parameters, data) {
+  w = parameters[1]
+  alpha = parameters[2]
+  beta = parameters[3]
+  
+  data$v = rep(0, nrow(ret_series))
+  data$v[1] = w/(1 - alpha - beta)
+
+  for (i in 2:nrow(data)) {
+    data$v[i] = w + alpha*(data$Return[i-1]^2) + beta*data$v[i-1]
+  }
+  loglikelihood = -sum(log(data$v) + (data$Return^2)/data$v)
+  
+  return(-loglikelihood)
+}
+
+generate_parameters_GARCH_MLE = function (parameters, data){
+  g_mle = optim(par = parameters, fn = garch_MLE, data = data)
+  return(g_mle$par)
+}
+
+par = generate_parameters_GARCH_MLE(parameters, data)
+data_subset$GARCH_vol[1] = abs(par[1])
+
+for (i in 2:nrow(data_subset)) {
+  #Calculating GaRCH based VaR
+  data_subset$GARCH_vol[i] = par[1] +par[3]*data_subset$GARCH_vol[i-1] +   par[2]*(data_subset$Return[i-1]^2)
+}
+
+data_subset$GARCH_VaR = qnorm(0.01)*sqrt(VaR_df$GARCH_vol)
+
+exception_GARCH = sum(data_subset$GARCH_VaR > data_subset$Return)
+
+plot(x = data_subset$Date, y = data_subset$Return, type = "l", pch=19, main = "VaR using EWMA", ylab = "Returns", col = "red", xlab = "date")
+lines(x = data_subset$Date, y = data_subset$EWMA_VaR, col = "blue")
+lines(x = data_subset$Date, y = data_subset$GARCH_VaR, col = "green")
+
+print(paste0("No of exceptions using GARCH is = ", exceptions))
+```
+3. Go back to the normalized returns from question 3 of the previous homework. Assess whether the left tail of these normalized returns follows a power law. Estimate the corresponding generalized Pareto distribution, and use these estimates to compute an estimate of the VaR for the last
+date in the sample.
+```{r}
+require(zoo)
+
+data$roll_vol = c(rep(0, 20), rollapplyr(data$Return, 21, sd))
+data$roll_mean = c(rep(0, 20), rollapplyr(data$Return, 21, mean))
+data = data %>% mutate(norm_ret = (Return - roll_mean)/roll_vol)
+data$norm_ret[is.infinite(data$norm_ret)] = 0
+
+loss_df = data.frame(extreme_loss_vec = rep(0, ceiling(nrow(data)/20)))
+
+loss_df = loss_df %>% mutate(extreme_loss_vec = sort(data$norm_ret)[1:ceiling(nrow(data)/20)]) %>%
+  mutate(log_prob = log(rank(extreme_loss_vec)/length(extreme_loss_vec))) %>%
+  mutate(log_loss = log(-extreme_loss_vec))
+
+reg_out = lm(log_prob ~ log_loss, data = loss_df)
+summary(reg_out)
+
+plot(x = loss_df$log_loss, y=loss_df$log_prob, xlab = "log(loss)", ylab = "log(probability)", main = "Tail losses")
+abline(a = reg_out$coefficients[1], b = reg_out$coefficients[2], col = "red")
+
+xi = -1/reg_out$coefficients[2]
+print(paste0("The value of Xi in power law = ", xi))
+
+#Estimating parameters of generalized pareto distribution
+
+u = abs(as.numeric(quantile(data$norm_ret, probs = 0.05)))
+
+gen_pareto = function (parameters, loss, u) {
+  xi = parameters[1]
+  beta = parameters[2]
+  y = loss - u
+  log_likelihood = sum((1/beta)*((1 + xi*y/beta)^(-1/xi - 1)))
+  return(-log_likelihood)
+}  
+
+parameters = c(xi, 1)
+pareto_mle = optim(par = parameters, fn = gen_pareto, loss = abs(loss_df$extreme_loss_vec), u = u)
+
+xi = as.numeric(pareto_mle$par[1])
+beta = as.numeric(pareto_mle$par[2])
+Pareto_VaR = u + (beta/xi)*((0.01*length(ret_series)/length(loss_df))^(-xi) - 1)
+
+print(paste0("The value of VaR using generalized Pareto distribution = ", Pareto_VaR))
+```
+
+
